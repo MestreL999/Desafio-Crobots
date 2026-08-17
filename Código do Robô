@@ -1,0 +1,255 @@
+/*
+ * ROBO: Sobrevivente/Assassino
+ * =============================================================
+ * ESTRATEGIA GERAL
+ * -----------------------------------------------------------
+ *  1) MODO SOBREVIVENCIA (enquanto houver 2+ inimigos vivos):
+ *     o robo prioriza fugir, evitar contato e preservar sua
+ *     vida, deixando os adversarios se desgastarem entre si.
+ *
+ *  2) MODO ASSASSINO (quando resta so 1 inimigo vivo):
+ *     como esse ultimo inimigo provavelmente ja enfrentou os
+ *     outros robos e esta com pouca vida, o robo passa a
+ *     caca-lo de forma agressiva ate destrui-lo.
+ *
+ * PROBLEMA A RESOLVER
+ * -----------------------------------------------------------
+ *  A linguagem Crobots nao tem nenhuma funcao pronta que diga
+ *  "quantos robos inimigos ainda estao vivos". A unica fonte de
+ *  informacao sobre os adversarios e scan(), que devolve a
+ *  distancia ate o robo mais proximo dentro de um cone de
+ *  varredura (nao diz QUEM e, nem quantos existem ao todo).
+ *
+ *  Para contornar isso, implementamos contar_inimigos(): uma
+ *  varredura completa de 360 graus, em passos pequenos, que
+ *  conta quantos "blocos" continuos de deteccao aparecem. Cada
+ *  bloco continuo e tratado como um robo diferente. Nao e uma
+ *  contagem 100% exata (dois robos muito proximos angularmente
+ *  podem ser contados como um so), mas na pratica funciona bem
+ *  o suficiente para decidir a troca de modo.
+ * =============================================================
+ */
+ 
+#include <crobots.h>
+ 
+/* ---------------------- Constantes ---------------------- */
+ 
+#define TAM_CAMPO          1000  /* dimensao do campo de batalha (0 a 1000)      */
+#define LIMITE_PAREDE      150   /* distancia minima segura ate as bordas        */
+#define DIST_SEGURA        200   /* abaixo disso, um inimigo e considerado perto */
+ 
+#define VELOCIDADE_FUGA    100   /* velocidade maxima usada ao fugir             */
+#define VELOCIDADE_ATK     80    /* velocidade usada durante a cacada final      */
+ 
+#define RES_CONTAGEM       1     /* resolucao fina do radar (contagem de robos)  */
+#define PASSO_CONTAGEM     3     /* incremento de angulo a cada passo da varred. */
+#define INTERVALO_CONTAGEM 15    /* faz a recontagem completa a cada N ciclos    */
+ 
+/* ---------------------- Variaveis globais ---------------------- */
+ 
+int inimigos_vivos = 3;  /* estimativa inicial; ajuste para (numero de robos - 1) */
+int dano_anterior   = 0; /* dano registrado na checagem anterior                  */
+int direcao_atual   = 0; /* direcao de movimento atual do robo                    */
+int ciclo           = 0; /* contador de iteracoes do laco principal               */
+ 
+/* ============================================================
+ * main()
+ * Laco principal: decide, a cada ciclo, se deve rodar a logica
+ * de sobrevivencia ou a logica de ataque, dependendo de quantos
+ * inimigos a ultima contagem indicou como vivos.
+ * ============================================================ */
+main()
+{
+    /* Comeca em movimento, numa direcao qualquer, ja em modo fuga */
+    direcao_atual = rand(360);
+    drive(direcao_atual, VELOCIDADE_FUGA);
+ 
+    while (1) {
+        ciclo = ciclo + 1;
+ 
+        /* A varredura completa de contagem e "cara" (varias         */
+        /* chamadas de scan em sequencia), entao nao a repetimos      */
+        /* todo ciclo -- so a cada INTERVALO_CONTAGEM ciclos. Nos      */
+        /* ciclos entre uma contagem e outra, seguimos usando o        */
+        /* ultimo valor conhecido.                                     */
+        if (ciclo % INTERVALO_CONTAGEM == 0) {
+            inimigos_vivos = contar_inimigos();
+        }
+ 
+        if (inimigos_vivos > 1) {
+            modo_sobrevivencia();
+        } else {
+            modo_assassino();
+        }
+    }
+}
+ 
+/* ============================================================
+ * contar_inimigos()
+ * Varre o circulo completo (360 graus) em passos de PASSO_CONTAGEM
+ * graus, usando resolucao fina (RES_CONTAGEM). Cada sequencia
+ * ininterrupta de deteccoes (scan diferente de 0) e contada
+ * como UM robo. Quando a varredura passa a nao detectar nada,
+ * "fechamos" aquele bloco, ficando prontos para contar o proximo
+ * robo assim que outro contato aparecer.
+ * ============================================================ */
+int contar_inimigos()
+{
+    int angulo;
+    int distancia;
+    int em_contato;  /* 1 = ainda dentro do mesmo bloco de deteccao */
+    int total;
+ 
+    total = 0;
+    em_contato = 0;
+ 
+    for (angulo = 0; angulo < 360; angulo = angulo + PASSO_CONTAGEM) {
+        distancia = scan(angulo, RES_CONTAGEM);
+ 
+        if (distancia != 0) {
+            if (em_contato == 0) {
+                total = total + 1;   /* novo bloco = novo robo */
+                em_contato = 1;
+            }
+        } else {
+            em_contato = 0;          /* contato perdido, bloco fechado */
+        }
+    }
+ 
+    /* Nunca deixe o contador zerar por falha de varredura: se nao  */
+    /* achamos nada, assumimos que ainda existe pelo menos 1         */
+    /* inimigo (pode estar fora do alcance do radar naquele          */
+    /* instante).                                                     */
+    if (total == 0) {
+        total = 1;
+    }
+ 
+    return total;
+}
+ 
+/* ============================================================
+ * modo_sobrevivencia()
+ * Ativo enquanto restam 2 ou mais inimigos. Objetivos, em ordem
+ * de prioridade:
+ *   1. Nunca ficar parado nem em linha reta por muito tempo
+ *      (alvo previsivel e alvo facil).
+ *   2. Fugir imediatamente na direcao oposta de qualquer
+ *      inimigo detectado por perto.
+ *   3. Reagir com evasao brusca sempre que o dano aumentar
+ *      (sinal de que fomos atingidos).
+ *   4. Nunca colidir com as paredes do campo (tambem causa dano).
+ * ============================================================ */
+modo_sobrevivencia()
+{
+    int dano_atual;
+    int angulo_teste, dist_teste;
+    int x, y;
+ 
+    /* --- 1. Verifica se fomos atingidos desde a ultima checagem --- */
+    dano_atual = damage();
+    if (dano_atual > dano_anterior) {
+        /* Fomos atingidos: troca de direcao de forma imprevisivel  */
+        /* e sai correndo na velocidade maxima.                     */
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    dano_anterior = dano_atual;
+ 
+    /* --- 2. Varredura barata para detectar ameacas proximas ---      */
+    /* Em vez de varrer os 360 graus (caro), testamos um unico          */
+    /* angulo aleatorio a cada ciclo. Ao longo de varios ciclos, o      */
+    /* robo acaba cobrindo boa parte do campo ao redor dele, com        */
+    /* baixo custo por ciclo.                                            */
+    angulo_teste = rand(360);
+    dist_teste = scan(angulo_teste, 15);
+ 
+    if (dist_teste != 0 && dist_teste < DIST_SEGURA) {
+        /* Ha um inimigo perto: fuja na direcao oposta a ele */
+        direcao_atual = (angulo_teste + 180) % 360;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    /* --- 3. Troca periodica de direcao (evita previsibilidade) --- */
+    if (ciclo % 7 == 0) {
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    /* --- 4. Evita colisao com as bordas do campo --- */
+    x = loc_x();
+    y = loc_y();
+ 
+    if (x < LIMITE_PAREDE) {
+        direcao_atual = 90;               /* foge para o "leste" */
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (x > TAM_CAMPO - LIMITE_PAREDE) {
+        direcao_atual = 270;              /* foge para o "oeste" */
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (y < LIMITE_PAREDE) {
+        direcao_atual = 0;                /* foge para o "norte" */
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (y > TAM_CAMPO - LIMITE_PAREDE) {
+        direcao_atual = 180;              /* foge para o "sul" */
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+}
+ 
+/* ============================================================
+ * modo_assassino()
+ * Ativado quando so resta 1 inimigo. Abandona a postura
+ * defensiva: varre o radar em busca do alvo e, ao encontra-lo,
+ * avanca em sua direcao enquanto dispara repetidamente.
+ * ============================================================ */
+modo_assassino()
+{
+    int angulo;
+    int distancia;
+ 
+    /* Varredura ampla (passos de 10 graus, resolucao 10) so para   */
+    /* achar a direcao geral de onde esta o ultimo inimigo restante. */
+    for (angulo = 0; angulo < 360; angulo = angulo + 10) {
+        distancia = scan(angulo, 10);
+ 
+        if (distancia != 0) {
+            /* Avanca na direcao do alvo: pressionar um inimigo ja  */
+            /* debilitado reduz o tempo que ele tem para se          */
+            /* recuperar, fugir ou nos atingir de volta.              */
+            drive(angulo, VELOCIDADE_ATK);
+            perseguir_e_atirar(angulo, distancia);
+            return; /* volta ao laco principal para reavaliar tudo */
+        }
+    }
+ 
+    /* Nao achou ninguem nesta passada (o inimigo pode estar fora   */
+    /* do alcance do radar no momento): continua se movendo para     */
+    /* cobrir mais area do mapa na proxima varredura.                 */
+    direcao_atual = rand(360);
+    drive(direcao_atual, VELOCIDADE_ATK);
+}
+ 
+/* ============================================================
+ * perseguir_e_atirar(angulo, distancia)
+ * Com o alvo ja localizado, refina a varredura em um cone mais
+ * estreito para acompanha-lo mesmo que ele se mova, disparando
+ * o canhao a cada nova posicao encontrada.
+ * ============================================================ */
+perseguir_e_atirar(int angulo, int distancia)
+{
+    int nova_distancia;
+ 
+    while (distancia != 0) {
+        cannon(angulo, distancia);
+ 
+        /* Cone estreito (resolucao 3) para reencontrar o mesmo    */
+        /* alvo com mais precisao, ja que ele pode ter se movido.   */
+        nova_distancia = scan(angulo, 3);
+ 
+        if (nova_distancia == 0) {
+            break; /* perdemos o alvo de vista */
+        }
+        distancia = nova_distancia;
+    }
+}
