@@ -1,0 +1,200 @@
+/*
+ * ROBO: Sobrevivente/Assassino
+ * =============================================================
+ * ESTRATEGIA GERAL
+ * -----------------------------------------------------------
+ *  1) MODO SOBREVIVENCIA (enquanto houver 2+ inimigos vivos):
+ *     o robo prioriza fugir, evitar contato e preservar sua
+ *     vida, deixando os adversarios se desgastarem entre si.
+ *
+ *  2) MODO ASSASSINO (quando resta so 1 inimigo vivo):
+ *     como esse ultimo inimigo provavelmente ja enfrentou os
+ *     outros robos e esta com pouca vida, o robo passa a
+ *     caca-lo de forma agressiva ate destrui-lo.
+ * =============================================================
+ */
+ 
+/* ---------------------- Constantes e Variaveis globais ---------------------- */
+ 
+int TAM_CAMPO;
+int LIMITE_PAREDE;
+int DIST_SEGURA;
+int VELOCIDADE_FUGA;
+int VELOCIDADE_ATK;
+int RES_CONTAGEM;
+int PASSO_CONTAGEM;
+int INTERVALO_CONTAGEM;
+ 
+int inimigos_vivos;
+int dano_anterior;
+int direcao_atual;
+int ciclo;
+ 
+/* ============================================================
+ * main()
+ * ============================================================ */
+main()
+{
+    /* O Crobots exige que toda atribuicao inicial ocorra aqui */
+    TAM_CAMPO          = 1000;
+    LIMITE_PAREDE      = 150;
+    DIST_SEGURA        = 200;
+    VELOCIDADE_FUGA    = 100;
+    VELOCIDADE_ATK     = 80;
+    RES_CONTAGEM       = 1;
+    PASSO_CONTAGEM     = 3;
+    INTERVALO_CONTAGEM = 15;
+ 
+    inimigos_vivos  = 3;
+    dano_anterior   = 0;
+    direcao_atual   = 0;
+    ciclo           = 0;
+ 
+    /* Comeca em movimento, numa direcao qualquer, ja em modo fuga */
+    direcao_atual = rand(360);
+    drive(direcao_atual, VELOCIDADE_FUGA);
+ 
+    while (1) {
+        ciclo = ciclo + 1;
+ 
+        if (ciclo % INTERVALO_CONTAGEM == 0) {
+            inimigos_vivos = contar_inimigos();
+        }
+ 
+        if (inimigos_vivos > 1) {
+            modo_sobrevivencia();
+        } else {
+            modo_assassino();
+        }
+    }
+}
+ 
+/* ============================================================
+ * contar_inimigos()
+ * ============================================================ */
+contar_inimigos()
+{
+    int angulo;
+    int distancia;
+    int em_contato;
+    int total;
+ 
+    total = 0;
+    em_contato = 0;
+    angulo = 0;
+ 
+    /* Substituicao do loop FOR pelo equivalente em WHILE */
+    while (angulo < 360) {
+        distancia = scan(angulo, RES_CONTAGEM);
+ 
+        if (distancia != 0) {
+            if (em_contato == 0) {
+                total = total + 1;
+                em_contato = 1;
+            }
+        } else {
+            em_contato = 0;
+        }
+        angulo = angulo + PASSO_CONTAGEM;
+    }
+ 
+    if (total == 0) {
+        total = 1;
+    }
+ 
+    return total;
+}
+ 
+/* ============================================================
+ * modo_sobrevivencia()
+ * ============================================================ */
+modo_sobrevivencia()
+{
+    int dano_atual;
+    int angulo_teste, dist_teste;
+    int x, y;
+ 
+    dano_atual = damage();
+    if (dano_atual > dano_anterior) {
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    dano_anterior = dano_atual;
+ 
+    angulo_teste = rand(360);
+    dist_teste = scan(angulo_teste, 15);
+ 
+    if (dist_teste != 0 && dist_teste < DIST_SEGURA) {
+        direcao_atual = (angulo_teste + 180) % 360;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    if (ciclo % 7 == 0) {
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    x = loc_x();
+    y = loc_y();
+ 
+    if (x < LIMITE_PAREDE) {
+        direcao_atual = 90;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (x > TAM_CAMPO - LIMITE_PAREDE) {
+        direcao_atual = 270;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (y < LIMITE_PAREDE) {
+        direcao_atual = 0;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    if (y > TAM_CAMPO - LIMITE_PAREDE) {
+        direcao_atual = 180;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+}
+ 
+/* ============================================================
+ * modo_assassino()
+ * ============================================================ */
+modo_assassino()
+{
+    int angulo;
+    int distancia;
+ 
+    angulo = 0;
+    while (angulo < 360) {
+        distancia = scan(angulo, 10);
+ 
+        if (distancia != 0) {
+            drive(angulo, VELOCIDADE_ATK);
+            perseguir_e_atirar(angulo, distancia);
+            return;
+        }
+        angulo = angulo + 10;
+    }
+ 
+    direcao_atual = rand(360);
+    drive(direcao_atual, VELOCIDADE_ATK);
+}
+ 
+/* ============================================================
+ * perseguir_e_atirar(angulo, distancia)
+ * ============================================================ */
+perseguir_e_atirar(angulo, distancia)
+int angulo, distancia; /* Parametros em formato K&R */
+{
+    int nova_distancia;
+ 
+    while (distancia != 0) {
+        cannon(angulo, distancia);
+ 
+        nova_distancia = scan(angulo, 3);
+ 
+        if (nova_distancia == 0) {
+            break; 
+        }
+        distancia = nova_distancia;
+    }
+}
