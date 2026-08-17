@@ -1,0 +1,414 @@
+/*
+ * ROBO: JOHN WICK REFORMULADO
+ * =============================================================
+ * ESTRATEGIA GERAL (evolucao do John Wick original)
+ * -----------------------------------------------------------
+ *  O John Wick original passava a maior parte da partida
+ *  fugindo sem revidar, e so "acordava" para atacar quando
+ *  restava um unico inimigo - o que o deixava indefeso e
+ *  previsivel durante boa parte do combate.
+ *
+ *  Esta versao mantem a mesma espinha dorsal (fuga com 2+
+ *  inimigos vivos / caca ao ultimo sobrevivente), mas incorpora
+ *  tecnicas estudadas nos robos hulk_25.r, thor_25.r e
+ *  ultron_25.r (Franco Cartieri):
+ *
+ *   - MIRA PREDITIVA (de ultron_25 e do calculo de deflexao de
+ *     hulk_25/thor_25): em vez de atirar direto na posicao onde
+ *     o inimigo foi visto, projeta-se seu deslocamento angular e
+ *     de distancia para atirar onde ele VAI estar.
+ *
+ *   - REFINAMENTO PROGRESSIVO DE ANGULO (Affina(), de hulk_25 e
+ *     thor_25): reduz a largura da varredura em passos, obtendo
+ *     um angulo de tiro muito mais preciso que uma varredura
+ *     unica e grosseira.
+ *
+ *   - REAQUISICAO RAPIDA (Ritrova(), de hulk_25 e thor_25): se o
+ *     alvo some da mira, salta em angulos largos (-84/+42/+126...)
+ *     em vez de reiniciar a varredura de 0 a 360 do zero.
+ *
+ *   - REACAO A DANO COM FREADA E REVERSAO (de ultron_25): ao
+ *     tomar dano significativo, freia antes de reverter a rota,
+ *     dificultando a previsao do proximo tiro inimigo (uma fuga
+ *     "arrastada" na mesma trajetoria e facil de acertar de novo).
+ *
+ *   - FUGA DIAGONAL DE CANTOS (inspirada na logica de quadrante
+ *     de hulk_25/thor_25/ultron_25): perto de um canto, foge na
+ *     diagonal para o centro em vez de corrigir um eixo por vez
+ *     (o John Wick original corrigia so o ultimo eixo verificado
+ *     e podia continuar perto da outra parede).
+ *
+ *  1) MODO SOBREVIVENCIA (2+ inimigos vivos):
+ *     prioriza fugir e preservar a vida, MAS agora nunca fica
+ *     totalmente desarmado: a cada ciclo faz uma varredura rapida
+ *     (com fallback em cascata, tecnica dos scans encadeados de
+ *     hulk_25/thor_25) e, se achar um inimigo ao alcance, dispara
+ *     um tiro de precisao sem abandonar a rota de fuga.
+ *
+ *  2) MODO ASSASSINO (so 1 inimigo vivo):
+ *     cacada continua com mira preditiva, reaquisicao rapida e
+ *     controle de distancia de combate (aproxima quando o alvo
+ *     esta longe; roda em torno dele - strafing - quando esta
+ *     muito perto, evitando colisao e mantendo o angulo de tiro
+ *     aberto).
+ * =============================================================
+ */
+ 
+/* ---------------------- Constantes e Variaveis globais ---------------------- */
+ 
+int TAM_CAMPO;
+int LIMITE_PAREDE;
+int DIST_SEGURA;
+int VELOCIDADE_FUGA;
+int VELOCIDADE_ATK;
+int RES_CONTAGEM;
+int PASSO_CONTAGEM;
+int INTERVALO_CONTAGEM;
+int DIST_CONTRA_ATAQUE;
+int LIMITE_DANO_CRITICO;
+int DIST_CORPO_A_CORPO;
+ 
+int inimigos_vivos;
+int dano_anterior;
+int direcao_atual;
+int ciclo;
+ 
+/* Estado de mira compartilhado entre o contra-ataque (modo fuga)
+   e a cacada (modo assassino) - usado para calcular tiros com
+   lideranca preditiva, tecnica de ultron_25/hulk_25. */
+int angulo_alvo;
+int angulo_anterior;
+int dist_alvo;
+int dist_anterior;
+int alterna;
+ 
+/* ============================================================
+ * main()
+ * ============================================================ */
+main()
+{
+    TAM_CAMPO           = 1000;
+    LIMITE_PAREDE       = 150;
+    DIST_SEGURA         = 200;
+    VELOCIDADE_FUGA     = 100;
+    VELOCIDADE_ATK      = 90;
+    RES_CONTAGEM        = 1;
+    PASSO_CONTAGEM      = 3;
+    INTERVALO_CONTAGEM  = 15;
+    DIST_CONTRA_ATAQUE  = 500;
+    LIMITE_DANO_CRITICO = 7;
+    DIST_CORPO_A_CORPO  = 120;
+ 
+    inimigos_vivos  = 3;
+    dano_anterior   = 0;
+    direcao_atual   = 0;
+    ciclo           = 0;
+ 
+    angulo_alvo     = 0;
+    angulo_anterior = 0;
+    dist_alvo       = 0;
+    dist_anterior   = 0;
+    alterna         = 0;
+ 
+    /* Comeca em movimento, numa direcao qualquer, ja em modo fuga */
+    direcao_atual = rand(360);
+    drive(direcao_atual, VELOCIDADE_FUGA);
+ 
+    while (1) {
+        ciclo = ciclo + 1;
+ 
+        if (ciclo % INTERVALO_CONTAGEM == 0) {
+            inimigos_vivos = contar_inimigos();
+        }
+ 
+        if (inimigos_vivos > 1) {
+            modo_sobrevivencia();
+        } else {
+            modo_assassino();
+        }
+    }
+}
+ 
+/* ============================================================
+ * contar_inimigos()
+ * ============================================================ */
+contar_inimigos()
+{
+    int angulo;
+    int distancia;
+    int em_contato;
+    int total;
+ 
+    total = 0;
+    em_contato = 0;
+    angulo = 0;
+ 
+    while (angulo < 360) {
+        distancia = scan(angulo, RES_CONTAGEM);
+ 
+        if (distancia != 0) {
+            if (em_contato == 0) {
+                total = total + 1;
+                em_contato = 1;
+            }
+        } else {
+            em_contato = 0;
+        }
+        angulo = angulo + PASSO_CONTAGEM;
+    }
+ 
+    if (total == 0) {
+        total = 1;
+    }
+ 
+    return total;
+}
+ 
+/* ============================================================
+ * modo_sobrevivencia()
+ * Foge, evita paredes/cantos e reage a dano - mas agora sempre
+ * revida quando um inimigo aparece ao alcance, sem abandonar a
+ * rota de fuga.
+ * ============================================================ */
+modo_sobrevivencia()
+{
+    int dano_atual;
+    int angulo_teste, dist_teste;
+    int x, y;
+ 
+    dano_atual = damage();
+ 
+    /* --- Reacao a dano: freia antes de reverter (ultron_25) ---
+       Trocar de direcao "a frio", sem antes reduzir a velocidade,
+       faz o robo continuar arrastando pela trajetoria antiga por
+       alguns instantes - o que o deixa previsivel. Freando antes
+       de reverter, a fuga muda de verdade, dificultando o
+       proximo tiro do inimigo. */
+    if (dano_atual > dano_anterior + LIMITE_DANO_CRITICO) {
+        drive(direcao_atual, 0);
+        while (speed() > 25) {
+            drive(direcao_atual, 0);
+        }
+        direcao_atual = (direcao_atual + 150 + rand(60)) % 360;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    } else if (dano_atual > dano_anterior) {
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+    dano_anterior = dano_atual;
+ 
+    /* --- Deteccao de ameaca: varredura em cascata ---
+       Em vez de testar um unico angulo aleatorio (facil de
+       "furar"), tenta ate 3 angulos em sequencia caso o
+       primeiro nao encontre nada - mesma ideia dos scans
+       encadeados (scan / senao scan(deg-21) / senao scan(deg+42))
+       usados em hulk_25 e thor_25. */
+    angulo_teste = rand(360);
+    dist_teste = scan(angulo_teste, 15);
+    if (dist_teste == 0) {
+        angulo_teste = angulo_teste + 45;
+        dist_teste = scan(angulo_teste, 15);
+    }
+    if (dist_teste == 0) {
+        angulo_teste = angulo_teste - 90;
+        dist_teste = scan(angulo_teste, 15);
+    }
+ 
+    if (dist_teste != 0 && dist_teste < DIST_SEGURA) {
+        direcao_atual = (angulo_teste + 180) % 360;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    /* --- Contra-ataque oportunista ---
+       Mesmo fugindo, se um inimigo foi localizado dentro do
+       alcance de contra-ataque, dispara um tiro de precisao
+       (mira preditiva) e retoma a rota de fuga em seguida.
+       Este e o ponto central da fusao fuga + contra-ataque. */
+    if (dist_teste != 0 && dist_teste < DIST_CONTRA_ATAQUE) {
+        mirar_e_atirar(angulo_teste);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    if (ciclo % 7 == 0) {
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+ 
+    /* --- Fuga diagonal de paredes/cantos ---
+       O John Wick original corrigia um eixo por vez (x depois y),
+       entao num canto a ultima correcao testada "vencia" e ele
+       podia continuar perto da outra parede. Aqui, ao detectar
+       proximidade de parede, calcula-se de uma vez a diagonal
+       que aponta para o centro do campo (logica de quadrante
+       emprestada de hulk_25/thor_25/ultron_25). */
+    x = loc_x();
+    y = loc_y();
+ 
+    if (x > TAM_CAMPO - LIMITE_PAREDE) {
+        if (y > TAM_CAMPO - LIMITE_PAREDE) {
+            direcao_atual = 225;
+        } else if (y < LIMITE_PAREDE) {
+            direcao_atual = 315;
+        } else {
+            direcao_atual = 270;
+        }
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    } else if (x < LIMITE_PAREDE) {
+        if (y > TAM_CAMPO - LIMITE_PAREDE) {
+            direcao_atual = 135;
+        } else if (y < LIMITE_PAREDE) {
+            direcao_atual = 45;
+        } else {
+            direcao_atual = 90;
+        }
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    } else if (y > TAM_CAMPO - LIMITE_PAREDE) {
+        direcao_atual = 180;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    } else if (y < LIMITE_PAREDE) {
+        direcao_atual = 0;
+        drive(direcao_atual, VELOCIDADE_FUGA);
+    }
+}
+ 
+/* ============================================================
+ * modo_assassino()
+ * Cacada final: localiza o ultimo sobrevivente, refina a mira,
+ * antecipa seu movimento (tiro preditivo) e administra a
+ * distancia de combate - aproxima quando esta longe, roda em
+ * volta (strafing) quando esta perto demais - mantendo pressao
+ * continua ate ele cair.
+ * ============================================================ */
+modo_assassino()
+{
+    int angulo;
+    int distancia;
+    int tentativas;
+ 
+    /* --- Varredura para localizar o alvo --- */
+    angulo = 0;
+    distancia = 0;
+    while (angulo < 360) {
+        distancia = scan(angulo, 12);
+        if (distancia != 0) {
+            angulo_alvo = angulo;
+            dist_alvo = distancia;
+            /* Zera a mira preditiva: a ultima leitura registrada
+               pode ser de outro alvo ou de um ciclo muito antigo,
+               entao o primeiro tiro desta aquisicao nao deve usar
+               lideranca calculada em cima dela. */
+            angulo_anterior = 0;
+            dist_anterior = 0;
+            break;
+        }
+        angulo = angulo + 12;
+    }
+ 
+    if (distancia == 0) {
+        /* Ninguem a vista: gira para varrer uma area nova na
+           proxima passada em vez de repetir o mesmo trajeto. */
+        direcao_atual = rand(360);
+        drive(direcao_atual, VELOCIDADE_ATK);
+        return;
+    }
+ 
+    /* --- Engajamento continuo --- */
+    tentativas = 0;
+    while (tentativas < 3) {
+ 
+        /* Controle de distancia de combate: aproxima se o alvo
+           esta longe; se esta muito perto, roda ao redor dele
+           (strafing, alternando o lado a cada passagem) em vez
+           de colidir de frente - evita dano de colisao e mantem
+           o angulo de tiro sempre aberto. */
+        if (dist_alvo > DIST_CORPO_A_CORPO) {
+            drive(angulo_alvo, VELOCIDADE_ATK);
+        } else {
+            direcao_atual = angulo_alvo + 90 + 180 * (alterna ^= 1);
+            drive(direcao_atual, VELOCIDADE_ATK);
+        }
+ 
+        if (mirar_e_atirar(angulo_alvo)) {
+            /* Achou e disparou: atualiza a referencia para a
+               leitura mais precisa que acabou de ser feita e
+               continua pressionando sem contar como tentativa
+               perdida. */
+            angulo_alvo = angulo_anterior;
+            dist_alvo   = dist_anterior;
+            tentativas  = 0;
+        } else {
+            tentativas = tentativas + 1;
+ 
+            /* --- Reaquisicao rapida (estilo Ritrova) ---
+               Em vez de reiniciar a varredura completa de 0 a
+               360, salta em angulos largos a partir da ultima
+               posicao conhecida do alvo - muito mais rapido para
+               reencontra-lo caso ele so tenha saido da mira fina
+               por um instante. */
+            if (distancia = scan(angulo_alvo - 84, 12)) {
+                angulo_alvo = angulo_alvo - 84;
+            } else if (distancia = scan(angulo_alvo + 42, 12)) {
+                angulo_alvo = angulo_alvo + 42;
+            } else if (distancia = scan(angulo_alvo + 126, 12)) {
+                angulo_alvo = angulo_alvo + 126;
+            } else if (distancia = scan(angulo_alvo - 168, 12)) {
+                angulo_alvo = angulo_alvo - 168;
+            } else {
+                dist_anterior = 0;
+                return;
+            }
+            dist_alvo = distancia;
+        }
+    }
+}
+ 
+/* ============================================================
+ * mirar_e_atirar(angulo_bruto)
+ * Sistema de mira compartilhado entre o contra-ataque (modo
+ * fuga) e as rajadas do modo assassino:
+ *   1) refina o angulo em passos decrescentes (equivalente ao
+ *      Affina() de hulk_25/thor_25);
+ *   2) se ja existe uma leitura anterior deste alvo, calcula um
+ *      tiro com lideranca preditiva (formula 2*novo - anterior,
+ *      tecnica classica de ultron_25 e do calculo de deflexao de
+ *      hulk_25/thor_25) para acertar alvos em movimento.
+ * Retorna 1 se encontrou o alvo e atirou, 0 se o perdeu.
+ * ============================================================ */
+mirar_e_atirar(angulo_bruto)
+int angulo_bruto; /* Parametro em formato K&R, como no John Wick original */
+{
+    int ang;
+    int dist;
+ 
+    ang = angulo_bruto;
+ 
+    if (scan(ang + 13, 10)) { ang = ang + 4; }
+    if (scan(ang - 13, 10)) { ang = ang - 4; }
+    if (scan(ang + 10, 6))  { ang = ang + 2; }
+    if (scan(ang - 10, 6))  { ang = ang - 2; }
+    if (scan(ang + 6, 3))   { ang = ang + 1; }
+    if (scan(ang - 6, 3))   { ang = ang - 1; }
+ 
+    dist = scan(ang, 2);
+ 
+    if (dist == 0) {
+        /* Mira fina nao achou nada: tenta a leitura bruta original
+           antes de desistir. */
+        dist = scan(angulo_bruto, 8);
+        ang = angulo_bruto;
+        if (dist == 0) {
+            return 0;
+        }
+    }
+ 
+    if (dist_anterior != 0) {
+        cannon(ang + (ang - angulo_anterior), (2 * dist) - dist_anterior);
+    } else {
+        cannon(ang, dist);
+    }
+ 
+    angulo_anterior = ang;
+    dist_anterior   = dist;
+ 
+    return 1;
+}
